@@ -1,0 +1,541 @@
+---
+title: "DAG 3 - Project 2"
+author: "Evelyn Tay"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::word_document2:
+    tables:
+      style: Normal Table
+      caption: 
+        style: Table Caption
+        pre: "Table "
+        sep: ". "       
+bibliography: Test2.bib
+csl: C:\\Users\\ETay\\Documents\\SAPs\\NIPSAP\\the-new-england-journal-of-medicine.csl
+
+---
+
+```{r setup, include=FALSE}
+options(mc.cores = parallel::detectCores())
+
+knitr::opts_chunk$set(echo = TRUE)
+library(bookdown)
+library(officedown)
+library(rethinking)
+library(truncnorm)
+library(cmdstanr)
+library(simstudy)
+library(dplyr)
+library(printr)
+library(tidyverse)
+library(flextable)
+library(bayesplot)
+library(pROC)
+
+check_cmdstan_toolchain(fix = TRUE, quiet = TRUE)
+
+register_knitr_engine(override = FALSE)
+```
+
+## Assumptions
+
+A \in {0,1} where A = 1 indicates an individual is \geq50 years of age and A = 0 indicates they are >50.
+
+S \in {0,1} where S = 1 indicates and individual had a moderate to highly severe vaccine reaction and S = 0 indicates an individual had no or a mild vaccine reaction
+
+Younger people are more likely to react to a vaccine and have an immune response than older people. Moderate to high severity vaccine reactions (S = 1) were reported more often by younger vaccine recipients (16 to 55 years) than by older ( > 55 years) in a Phase II-III trial of a COVID19 vaccine.
+
+P(S = 1| A = 0) = 0.6 
+
+P(S = 1| A = 1) = 0.4
+
+We are assuming that whether an individual responds to a survey or not is dependent upon both the age of an individual and the severity of their vaccine reaction. Here, R indicates whether an individual responded to a survey or not where  R \in {0,1}. R = 1 indicates an individual responded to a survey and R = 0 indicates an individual did not.
+
+People <50 years have a lower response rate to health surveys than >50 [@RN15] and this is incorporated in the following assumptions: ?P(R = 1| A= 1) = 0.3, P(R = 1| A = 0) = 0.7
+
+P(R = 1| A = 1, S = 1) = 0.85
+
+P(R = 1| A = 1, S = 0) = 0.4
+
+P(R = 1| A = 0, S = 1) = 0.6
+
+P(R = 1| A = 0, S = 0) = 0.15
+
+We are assuming that older people are more likely to seek medical attention than younger people.[@RN18] Here, M indicates whether an individual sought medical attention for a vaccine reaction or not where M\ \in {0,1}. M = 1 indicates an individual sought medical attention survey and M = 0 indicates an individual did not. Also, we are assuming that if an individual has no or a mild vaccine reaction, they are very unlikely to seek medical attention.
+
+P(M = 1| A = 1, S = 1) = 0.15
+
+P(M = 1| A = 1, S = 0) = 0.05
+
+P(M = 1| A = 0, S = 1) = 0.05
+
+P(M = 1| A = 0, S = 0) = 0.005
+
+The outcome D (disclosed or reported as having sought medical attention) is dependent upon whether an individual responds (R) to a survey and whether they sought medical attention (M) for a reaction to the vaccine. Whether an individual reports that they have sought medical attention is deterministic on whether they responded to a survey or not, however, if they did not seek medical attention there may be probability very close to zero that they reported as having sought medical attention (?).
+P(D = 1| R = 1, M = 1) = 0.999
+
+P(D = 1| R = 1, M = 0) = 0.001
+
+P(D = 1| R = 0, M = 0) = 0
+
+## Simulation
+
+The ages of 4,000 individuals were simulated by sampling from a truncated Normal distribution to ensure positive values with a mean age of 43.5 years and sd of 18.6 to ensure an even and plausible spread over the threshold age of 50 years.This was based upon fitting a Normal distribution to age data from participants vaccinated with COVID-19 vaccines.
+
+```{r, echo = FALSE}
+N = 4000
+Asim <-abs(rtruncnorm(N,mean = 43.5, sd = 18.6))
+
+Asim<-as.integer(Asim)
+dummy <- function(Asim) {if (Asim < 50) {A<-0} else {A<-1}}
+
+hist(Asim)
+print(summary(Asim))
+
+A <- lapply(Asim, dummy)
+A <- unlist(A)
+
+
+reaction <- function(A) {if (A > 0) {S <- rbern(1, 0.4)} else {S <- rbern(1, 0.6)}}
+
+S <- lapply(A, reaction)
+S <- unlist(S)
+
+dat <- data.frame(A,S)
+
+response <- function(dat) 
+  {A = dat[1]
+  S = dat[2]
+  if( A > 0 & S > 0) {R <- rbern(1, 0.85)}
+  
+  else if( A > 0 & S < 1 )  {R <- rbern(1, 0.4)} 
+  
+  else if( A < 1 & S > 0 ) {R <- rbern(1, 0.6)}
+  
+  else  {R <- rbern(1, 0.15)} #(A < 1 & S < 1)
+  
+  return(R)
+  
+  }
+
+R <- apply(dat, 1 ,response)
+R <- unlist(R)
+
+dat$R <- R
+
+###Simulating M
+
+seek <- function(dat) 
+{A = dat[1]
+S = dat[2]
+if( A > 0 & S > 0) {M <- rbern(1, 0.15)} #0.00595 (P(RMA = 1| A = 1, S = ?) from signal detection data)
+
+else if( A > 0 & S < 1 )  {M <- rbern(1, 0.05)} #0.001
+
+else if( A < 1 & S > 0 ) {M <- rbern(1, 0.05)}#0.01 (P(RMA = 1| A = 0, S = ?) from signal detection data)
+
+else  {M <- rbern(1, 0.005)} #(A < 1 & S < 1) #0.001
+
+return(M)
+
+}
+
+M <- apply(dat, 1, seek)
+M <- unlist(M)
+dat$M <- M
+
+
+#####################################################
+
+mean(dat[dat$A == 0,]$S) #P(S = 1|A = 0)
+
+mean(dat[dat$A == 1,]$S) #P(S = 1|A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 0,]$R) #P(R = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 1,]$R) #P(R = 1|S = 1 A = 0)
+
+mean(dat[dat$A == 1 & dat$S == 0,]$R) #P(R = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 1 & dat$S == 1,]$R) #P(R = 1|S = 1 A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 0,]$M) #P(M = 1|S = 0 A = 0)
+
+mean(dat[dat$A == 0 & dat$S == 1,]$M) #P(M = 1|S = 1 A = 0)
+
+mean(dat[dat$A == 1 & dat$S == 0,]$M) #P(M = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 1 & dat$S == 1,]$M) #P(M = 1|A = 1,S = 1)
+
+mean(dat[dat$R == 1 & dat$M == 1,]$D) #P(D = 1|R = 1,M = 1)
+
+dat_R <- dat %>% filter(R == 1)
+
+##Totals of variables
+#
+mean(dat$A == 1)
+
+mean(dat$S == 1)
+
+mean(dat_R$S == 1)
+
+mean(dat$R == 1)
+
+mean(dat$M == 1)
+
+mean(dat$D == 1)
+
+mean(dat_R$D == 1)
+
+```
+Histogram and summary of simulated ages (A sim).
+
+Individual response to a survey and probability of an individual seeking medical attention were modeled as binary outcomes and sampled from Bernoulli distributions conditional on the age category and severity of systemic reaction of an individual.
+
+Table of probabilities derived from the simulated data.
+
+
+```{r, echo = FALSE, message = FALSE}
+gloss <- data.frame(Probs = c("P(S = 1| A = 0)",
+                             "P(S = 1| A = 1)",
+                             "P(R = 1| A = 0, S = 0)",
+                             "P(R = 1| A = 0, S = 1)",
+                             "P(R = 1| A = 1, S = 0)",
+                             "P(R = 1| A = 1, S = 1)",
+                             "P(M = 1| A = 0, S = 0)",
+                             "P(M = 1| A = 0, S = 1)",
+                             "P(M = 1| A = 1, S = 0)",
+                             "P(M = 1| A = 1, S = 1)"
+                             ),
+                  Prob = c(" ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ")
+                
+                   
+)
+
+colnames(gloss) <- c(" ","Probability")
+
+flextable(gloss) %>% color(part = "header", color = "black") %>%
+  bold(part = "header", bold = TRUE) %>%
+  align(part = "all", align = "left") %>%
+  fontsize(size = 11, part = "all") %>%
+  padding(padding = 1, part = "body") %>%
+  set_table_properties(layout = "autofit") 
+
+```
+
+## Bayesian logistic regression model
+
+For effect of age and degree of systemic reaction on response and also on seeking medical attention. 
+
+A -> S, A -> R <- S, A -> M <- S
+
+\begin{align}
+R_{i} \sim \text{Bern}(p_{i}) \\
+S_{i} \sim \text{Bern}q_{i}) \\
+M_{i} \sim \text{Bern}(g_{i}) \\
+logit(p_{i}) = \alpha_{p} + \beta_{AR} * A_{i} + \beta_{SR} * S_{i} \\
+logit(q_{i}) = \alpha_{q} + \beta_{AS} * A_{i} \\
+logit(g_{i}) = \alpha_{s} + \beta_{AM} * A_{i} + \beta_{SM} * S_{i} \\
+\alpha_{p}, \alpha_{q}, \alpha_{g} \sim Normal(0, \sigma) \\
+\alpha_{g} \sim Normal(0, \sigma) \\
+\beta_{AR}, \beta_{SR}, \beta_{AS} \sim Normal(0, 1) \\
+\beta_{AM}, \beta_{SM} \sim Normal(0, 1) \\
+\sigma \sim Exponential(1) \\
+\end{align}
+
+For effect of age on severity. 
+
+A -> S
+
+\begin{align}
+S_{i} \sim \text{Bern}(r_{i}) \\
+logit(q_{i}) = \alpha_{q} + \beta_{AS} * A_{i} \\
+\alpha_{q} \sim Normal(0, \sigma) \\
+\beta_{AS} \sim Normal(0, 1) \\
+\sigma \sim Exponential(1) \\
+\end{align}
+
+For effect of age and degree of systemic reaction on response. 
+
+A <- S, A -> R <- S
+
+\begin{align}
+R_{i} \sim \text{Bern}(p_{i}) \\
+S_{i} \sim \text{Bern}(q_{i}) \\
+logit(p_{i}) = \alpha_{p} + \beta_{AR} * A_{i} + \beta_{SR} * S_{i} \\
+logit(q_{i}) = \alpha_{q} + \beta_{AS} * A_{i} \\
+\alpha_{p}, \alpha_{q} \sim Normal(0, \sigma) \\
+\beta_{AR}, \beta_{SR}, \beta_{AS} \sim Normal(0, 1) \\
+\sigma \sim Exponential(1) \\
+\end{align}
+
+
+Where:
+
+$i$ = 1 to 2000 
+
+$R_{i}$ = whether an individual responded to the survey or not
+
+$S_{i}$ = severity of systemic reaction of an individual
+
+$A_{i}$ = age group of individuals 
+
+$M_{i}$ = whether an individual sought medical attention or not
+
+$p_{i}$ = P(R = 1) of an individual conditional on S and A
+
+$q_{i}$ = P(S = 1) of an individual conditional on A
+
+$g_{i}$ = P(M = 1) of an individual conditional on S and A
+
+$\alpha_{p}$ = log of baseline survey response rate of individuals <50 years who did not get a mod-high severity systemic reaction
+
+$\alpha_{q}$ = log of baseline rate of mod-high severity systemic reaction in individuals <50 years 
+
+$\alpha_{g}$ = log of baseline rate of seeking medical attention of individuals <50 years who did not get a mod-high severity systemic reaction 
+
+$\beta_{AS}$ = log odds ratio of age group on severity of systemic reaction
+
+$\beta_{AM}$ = log odds ratio of age group on seeking medical attention
+
+$\beta_{SM}$ = log odds ratio of severity of systemic reaction on seeking medical attention
+
+
+```{stan output.var = "mod1", include = FALSE}
+
+data{
+    int N;
+    int R[N];
+    int S[N];
+    int A[N];
+    int M[N];
+}
+parameters{
+    real ap;
+    real bAR;
+    real bSR;
+    real<lower=0> sigmap;
+    real ag;
+    real bAM;
+    real bSM;
+    real<lower=0> sigmag;
+    real aq;
+    real bAS;
+    real<lower=0> sigmaq;
+}
+transformed parameters{
+  vector[N] p;
+  vector[N] q;
+  vector[N] g;
+  for(i in 1:N) q[i] = inv_logit(aq + bAS*A[i]);
+  for(i in 1:N) p[i] = inv_logit(ap + bAR*A[i] + bSR*S[i]);
+  for(i in 1:N) g[i] = inv_logit(ag + bAM*A[i] + bSM*S[i]);
+}
+model{
+    
+    //priors
+    sigmaq ~ exponential( 1 );
+    bAS ~ normal(0, 2);
+    aq ~ normal(0, sigmaq);
+    
+    //likelihood
+    S ~ bernoulli(q);
+    
+    //priors
+    sigmap ~ exponential(1);
+    bSR ~ normal( 0 , 2 );
+    bAR ~ normal( 0 , 2 );
+    ap ~ normal( 0 , sigmap );
+    
+    //likelihood
+    R ~ bernoulli( p );
+    
+    //priors
+    sigmag ~ exponential(1);
+    bSM ~ normal( 0 , 2 );
+    bAM ~ normal( 0 , 2 );
+    ag ~ normal( 0 , sigmag );
+    
+    //likelihood
+    M ~ bernoulli( g );
+    
+}
+
+generated quantities {
+  //generate predictions
+  real qA0 = inv_logit(aq);  //pA0 = P(S=1|A=0)
+  real qA1 = inv_logit(aq + bAS); //pA1 = P(S=1|A=1)
+  real pA0S0 = inv_logit(ap); //P(R=1|A=0,S=0)
+  real pA0S1 = inv_logit(ap + bSR); //P(R=1|A=0,S=1)
+  real pA1S0 = inv_logit(ap + bAR); //P(R=1|A=1,S=0)
+  real pA1S1 = inv_logit(ap + bAR + bSR); //P(R=1|A=1,S=1)
+  real gA0S0 = inv_logit(ag); //P(R=1|A=0,S=0)
+  real gA0S1 = inv_logit(ag + bSM); //P(R=1|A=0,S=1)
+  real gA1S0 = inv_logit(ag + bAM); //P(R=1|A=1,S=0)
+  real gA1S1 = inv_logit(ag + bAM + bSM); //P(R=1|A=1,S=1)
+ //prior predictive check
+ 
+  real<lower=0> sigsim = exponential_rng(1);
+  real apsim = normal_rng(0,sigsim);
+  real bARsim = normal_rng(0,1);
+  real bSRsim = normal_rng(0,1);
+  real agsim = normal_rng(0,sigsim);
+  real bAMsim = normal_rng(0,1);
+  real bSMsim = normal_rng(0,1);
+
+  vector[N] psim;
+  vector[N] Rsim;
+  vector[N] gsim;
+  vector[N] Msim;
+  
+  for ( i in 1:N ) {
+      psim[i] = apsim + bARsim * A[i] + bSRsim * S[i]; #A is from the data
+     psim[i] = inv_logit(psim[i]);
+      Rsim[i] = bernoulli_rng(psim[i]);
+      
+      
+    }
+   for ( i in 1:N ) {
+     
+      gsim[i] = agsim + bAMsim * A[i] + bSMsim * S[i]; #A is from the data
+      gsim[i] = inv_logit(gsim[i]);
+      Msim[i] = bernoulli_rng(gsim[i]);
+      
+    }
+}
+
+
+
+```
+
+```{r, echo = FALSE}
+
+dat1 <- list(S = S, R = R, A = A, M = M, N = N)
+mod1_mod <- rstan::sampling(mod1, data = dat1,iter = 2000, warmup = 100, chains = 2, refresh = FALSE, show_messages = FALSE)
+#print(mod1_mod)
+params <- summary(mod1_mod, pars = c("ap", "bAR", "bSR", "aq", "bAS", "ag", "bAM", "bSM",
+                                     "qA0", "qA1","pA0S0","pA0S1","pA1S1","pA1S0",
+                                     "gA0S0", "gA0S1", "gA1S0", "gA1S1"))$summary
+print(params)
+```
+
+
+```{r post-beta-c, fig.height = 5, fig.width = 5, fig.cap = "Posterior distributions for $\\beta$ showing mean and 80% interval." , echo = FALSE}
+mcmc_areas(
+  posterior, 
+  pars = c("bAR", "bSR", "bAS", "bAM","bSM","bRD","bMD"),
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.99, # 95%
+  point_est = "mean"
+  )
+
+```
+Point range plot of the posterior distributions of the estimated parameters showing the median estimate and the 95% credible intervals. 
+
+Validate the model by using the predictive probability checks. In Bayesian logistic regression, we can test our model by checking the estimates of the log-ORs derived from the posteriors by back-transformation to the probabilities and compare these to the probabilities form the simulated data.
+
+```{stan, output.var = "mod2", include = FALSE}
+data {
+  int<lower=0> N;
+  int S[N];
+  int A[N];
+}
+
+
+parameters {
+  real aq;
+  real bAS;
+  real<lower=0> sigmaq;
+}
+
+model {
+  vector[N] q;
+  sigmaq ~ exponential( 1 );
+    bAS ~ normal( 0, 1);
+    aq ~ normal( 0 , sigmaq );
+    for ( i in 1:N ) {
+        q[i] = aq + bAS * A[i];
+        q[i] = inv_logit(q[i]);
+    }
+    S ~ bernoulli( q );
+}
+
+```
+
+
+```{r, echo = FALSE}
+options(mc.cores = parallel::detectCores())
+dat2 <- list(S = S, A = A, N = N)
+mod2_mod <- rstan::sampling(mod2, data = dat2,iter = 2000, warmup = 100, chains = 2, refresh = FALSE, show_messages = FALSE)
+print(mod2_mod)
+stan_plot(mod2_mod, ci_level = FALSE)
+
+```
+
+Point range plot of the posterior distributions of the estimated parameters showing the median estimate and the 95% credible intervals. 
+
+```{stan, output.var = "mod3", include = FALSE}
+
+data{
+    int N;
+    int R[N];
+    int S[N];
+    int A[N];
+}
+parameters{
+    real ap;
+    real bAR;
+    real bSR;
+    real<lower=0> sigma;
+    real aq;
+    real bAS;
+    real<lower=0> sigmaA;
+}
+transformed parameters{
+  vector[N] p;
+  vector[N] q;
+  for(i in 1:N) q[i] = inv_logit(aq + bAS*A[i]);
+  for(i in 1:N) p[i] = inv_logit(ap + bAR*A[i] + bSR*S[i]);
+}
+model{
+    
+    //priors
+    sigmaA ~ exponential( 1 );
+    bAS ~ normal(0, 1);
+    aq ~ normal(0, 1);
+    
+    //likelihood
+    S ~ bernoulli(q);
+    //priors
+    sigma ~ exponential(1);
+    bSR ~ normal( 0 , 1 );
+    bAR ~ normal( 0 , 1 );
+    ap ~ normal( 0 , sigma );
+    
+    //likelihood
+    R ~ bernoulli( p );
+}
+
+```
+
+```{r, echo = FALSE}
+options(mc.cores = parallel::detectCores())
+dat3 <- list(S = S, R = R, A = A, N = N, N_A = N)
+mod3_mod <- rstan::sampling(mod3, data = dat3,iter = 2000, warmup = 100, chains = 2, refresh = FALSE, show_messages = FALSE)
+params <- summary(mod3_mod, pars = c("ap", "bAR", "bSR", "aq", "bAS"))$summary
+print(params)
+stan_plot(mod3_mod, ci_level = FALSE)
+out <- rstan::extract(mod3_mod)
+
+```
+
+## References

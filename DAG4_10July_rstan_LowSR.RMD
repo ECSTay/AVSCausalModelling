@@ -1,0 +1,777 @@
+---
+title: "DAG 4 - reworking - Low prev SR"
+author: "Evelyn Tay"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::word_document2:
+    tables:
+      style: Normal Table
+      caption: 
+        style: Table Caption
+        pre: "Table "
+        sep: ". "       
+#bibliography: Test2.bib
+#csl: C:\\Users\\ETay\\Documents\\SAPs\\NIPSAP\\the-new-england-journal-of-medicine.csl
+
+---
+
+```{r setup, include=FALSE}
+options(mc.cores = parallel::detectCores())
+
+knitr::opts_chunk$set(echo = TRUE)
+library(bookdown)
+library(officedown)
+#library(rethinking)
+library(truncnorm)
+library(rstan)
+library(posterior)
+#library(simstudy)
+library(dplyr)
+library(printr)
+library(tidyverse)
+library(flextable)
+library(bayesplot)
+library(rstanarm)
+library(pROC)
+```
+
+## Assumptions for the generative model
+
+We denote age as a binary variable, $A_i \in {0,1}$ for participant $i = 1,2,...,N$, where $A_i = 0$ indicates an individual $<$50 years of age and $A_i = 1$ indicates an individual $\geq$50 years of age. Similarly, severity of vaccine reaction is denoted as $S_i \in {0,1}$ for participant $i = 1,2,...,N$, where $S_i = 0$ indicates no or a mild vaccine reaction and $S_i = 1$ indicates a moderate or highly severe vaccine reaction.
+
+Younger people are more likely to react to a vaccine and have an immune response than older people. Moderate to highly severe reactions, i.e. $S_i = 1$ were reported more often by younger vaccine recipients ( 16 to 55 years) than by older ($/gt$55 years) in a phase II-III trial of a COVID19 vaccine. We are assuming low prevalances of a moderate to highly severe vaccine reaction in this scenario.
+
+P(S = 1| A = 0) = 0.3
+
+P(S = 1| A = 1) = 0.2
+
+We are assuming whether an individual responds to a survey or not is dependent upon both the age of an individual and the severity of their vaccine reaction. Here, we denote responded to a survey as $R_i \in {0,1}$ for participant $i = 1,2,...,N$, where $R_i = 0$ indicates an individual did not respond to a survey and $R_i = 1$ indicates that they did. People $<$50 years of age have a lower response rate to health surveys than those $/gt$50 years (ref) and this, together with the assumption that those $<$50 years are more likely to have a moderate to highly severe vaccine reaction are incorporated in the following assumptions:
+
+P(R = 1| A = 1, S = 1) = 0.85
+
+P(R = 1| A = 1, S = 0) = 0.4
+
+P(R = 1| A = 0, S = 1) = 0.6
+
+P(R = 1| A = 0, S = 0) = 0.15
+
+We are assuming that younger people are less likely to seek medical attention than older people.[@RN18] Here, seeking medical attention is denoted as $M_i \in {0,1}$ for participant $i = 1,2,...,N$,where $M_i = 0$ indicates an individual did not seek medical attention and $M_i = 1$ indicates that they did. Together with making the assumption that an individual is less likely to seek medical attention if they have no or a mild vaccine reaction, we make the following assumptions about the prevalence of seeking medical attention:
+
+
+P(M = 1| A = 1, S = 1) = 0.15 
+
+P(M = 1| A = 1, S = 0) = 0.05
+
+P(M = 1| A = 0, S = 1) = 0.05 
+
+P(M = 1| A = 0, S = 0) = 0.005
+
+The outcome D (disclosed or reported as having sought medical attention) is dependent upon whether an individual responds (R) to a survey and whether they sought medical attention (M) for a reaction to the vaccine. Whether an individual reports that they have sought medical attention is deterministic on whether they responded to a survey or not, however, if they did not seek medical attention there may be probability very close to zero that they reported as having sought medical attention (?).
+
+P(D = 1| R = 1, M = 1) = 0.999
+
+P(D = 1| R = 1, M = 0) = 0.001
+
+P(D = 1| R = 0, M = 0) = 0
+
+## Simulation results from the generative model
+
+The ages of 2,000 individuals were simulated by sampling from a truncated Normal distribution to ensure positive values with a mean age of 43.5 years and sd of 18.6 to ensure an even and plausible spread over the threshold age of 50 years.This was based upon fitting a Normal distribution to age data from participants vaccinated with COVID-19 vaccines.
+
+```{r, echo = FALSE}
+N = 4000
+Asim <-abs(rtruncnorm(N,mean = 43.5, sd = 18.6))
+
+Asim<-as.integer(Asim)
+dummy <- function(Asim) {if (Asim < 50) {A<-0} else {A<-1}}
+
+hist(Asim)
+print(summary(Asim))
+
+A <- lapply(Asim, dummy)
+A <- unlist(A)
+
+
+reaction <- function(A) {if (A > 0) {S <- rbinom(1,1,0.2)} else {S <- rbinom(1, 1,0.3)}}
+
+S <- lapply(A, reaction)
+S <- unlist(S)
+dat <- data.frame(A,S)
+
+response <- function(dat) 
+  {A = dat[1]
+  S = dat[2]
+  if( A > 0 & S > 0) {R <- rbinom(1, 1, 0.85)}
+  
+  else if( A > 0 & S < 1 )  {R <- rbinom(1, 1,0.40)} 
+  
+  else if( A < 1 & S > 0 ) {R <- rbinom(1,1, 0.60)}
+  
+  else  {R <- rbinom(1,1, 0.15)} 
+  
+  return(R)
+  
+  }
+
+R <- apply(dat, 1 ,response)
+R <- unlist(R)
+dat$R <- R
+
+###Simulating SMA
+
+seek <- function(dat) 
+{A = dat[1]
+S = dat[2]
+if( A > 0 & S > 0) {M <- rbinom(1,1, 0.15)} 
+
+else if( A > 0 & S < 1 )  {M <- rbinom(1,1, 0.05)} 
+
+else if( A < 1 & S > 0 ) {M <- rbinom(1, 1,0.05)}
+
+else  {M <- rbinom(1,1, 0.005)} #(A < 1 & S < 1) 
+
+return(M)
+
+}
+
+M <- apply(dat, 1 ,seek)
+M <- unlist(M)
+dat$M <- M
+
+reportMA <- function(dat)
+{A = dat[1]
+  S = dat[2]
+  R = dat[3]
+M = dat[4]
+if (R > 0 & M > 0 ) {D <- rbinom(1,1,0.999)}# R = 1, M = 1
+
+else if( R > 0 & M < 1 )  {D <- rbinom(1,1,0.001)} #R = 1, M = 0
+
+else  {D <- 0} #R = 0, M = 0
+  
+return(D)
+}
+
+D <- apply(dat, 1, reportMA)
+D <- unlist(D)
+dat$D <- D
+#####################################################
+
+mean(dat[dat$A == 0,]$S) #P(S = 1|A = 0)
+
+mean(dat[dat$A == 1,]$S) #P(S = 1|A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 0,]$R) #P(R = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 1,]$R) #P(R = 1|S = 1 A = 0)
+
+mean(dat[dat$A == 1 & dat$S == 0,]$R) #P(R = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 1 & dat$S == 1,]$R) #P(R = 1|S = 1 A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 0,]$M) #P(M = 1|S = 0 A = 0)
+
+mean(dat[dat$A == 0 & dat$S == 1,]$M) #P(M = 1|S = 1 A = 0)
+
+mean(dat[dat$A == 1 & dat$S == 0,]$M) #P(M = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 1 & dat$S == 1,]$M) #P(M = 1|A = 1,S = 1)
+
+mean(dat[dat$R == 1 & dat$M == 1,]$D) #P(D = 1|R = 1,M = 1)
+
+dat_R <- dat %>% filter(R == 1)
+
+
+##Totals of variables
+#
+mean(dat$A == 1)
+
+mean(dat$S == 1)
+
+mean(dat_R$S == 1)
+
+mean(dat$R == 1)
+
+mean(dat$M == 1)
+
+mean(dat$D == 1)
+
+mean(dat_R$D == 1)
+
+```
+Histogram and summary of simulated ages (A sim).
+
+Individual response to a survey and probability of an individual seeking medical attention were modeled as binary outcomes and sampled from Bernoulli distributions conditional on the age category and severity of reaction of an individual. Whether an individual responded as having sought medical attention for a reaction was also modeled as a binary outcome from a Bernoulli distribution dependent upon whether an individual responded to a survey and also sought medical attention
+
+Table of probabilities derived from the simulated data.
+
+
+```{r, echo = FALSE, message = FALSE}
+gloss <- data.frame(Probs = c("P(S = 1| A = 0)",
+                             "P(S = 1| A = 1)",
+                             "P(R = 1| A = 0, S = 0)",
+                             "P(R = 1| A = 0, S = 1)",
+                             "P(R = 1| A = 1, S = 0)",
+                             "P(R = 1| A = 1, S = 1)",
+                             "P(M = 1| A = 0, S = 0)",
+                             "P(M = 1| A = 0, S = 1)",
+                             "P(M = 1| A = 1, S = 0)",
+                             "P(M = 1| A = 1, S = 1)",
+                             "P(D = 1| R = 1, M = 1)"
+                             ),
+                  Prob = c(" ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ",
+                                 " ")
+                
+                   
+)
+
+colnames(gloss) <- c(" ","Probability")
+
+flextable(gloss) %>% color(part = "header", color = "black") %>%
+  bold(part = "header", bold = TRUE) %>%
+  align(part = "all", align = "left") %>%
+  fontsize(size = 11, part = "all") %>%
+  padding(padding = 1, part = "body") %>%
+  set_table_properties(layout = "autofit") 
+
+```
+
+## Bayesian logistic regression models
+
+Model 1: For effect of age and degree of reaction on response and also on seeking medical attention. For effect of response and seeking medical attention on responding that an individual sought medical attention for a reaction to a vaccine
+
+A -> S, A -> R <- S, A -> M <- S, R -> D <- M 
+
+\begin{align}
+R_{i} \sim \text{Bern}(p_{i}) \\
+S_{i} \sim \text{Bern}q_{i}) \\
+M_{i} \sim \text{Bern}(g_{i}) \\
+\text{If R_{i} then} D_{i} \sim \text{Bern}(h_{i}) \\
+logit(p_{i}) = \alpha_{p} + \beta_{AR} * A_{i} + \beta_{SR} * S_{i} \\
+logit(q_{i}) = \alpha_{q} + \beta_{AS} * A_{i} \\
+logit(g_{i}) = \alpha_{s} + \beta_{AM} * A_{i} + \beta_{SM} * S_{i} \\
+logit(h_{i}) = \alpha_{h} + \beta_{MD} * M_{i} \\ 
+\alpha_{p}, \alpha_{q}, \alpha_{g}, \alpha_{h} \sim Normal(0.5, \sigma) \\
+\beta_{AR}, \beta_{SR}, \beta_{AS} \sim Normal(0, 2) \\
+\beta_{AM}, \beta_{SM} \sim Normal(0, 2) \\
+\beta_{SD} \sim Normal(0, 2) \\
+\sigma \sim Exponential(1) \\
+\end{align}
+
+Where:
+
+$i$ = 1 to 4000 
+
+$R_{i}$ = whether an individual responded to the survey or not
+
+$S_{i}$ = severity of reaction to a vaccine of an individual
+
+$A_{i}$ = age group of individuals 
+
+$M_{i}$ = whether an individual sought medical attention or not
+
+$D_{i}$ = whether an individual responded that they sought medical attention or not
+
+$p_{i}$ = P(R = 1) of an individual conditional on S and A
+
+$q_{i}$ = P(S = 1) of an individual conditional on A
+
+$g_{i}$ = P(M = 1) of an individual conditional on S and A
+
+$h_{i}$ = P(D = 1) of an individual conditional on R and M
+
+$\alpha_{p}$ = log of baseline survey response rate of individuals <50 years who got no or a mild reaction
+
+$\alpha_{q}$ = log of baseline rate of mod-high severe reaction in individuals <50 years 
+
+$\alpha_{g}$ = log of baseline rate of seeking medical attention of individuals <50 years who got no or a mild reaction 
+
+$\alpha_{h}$ = log of baseline rate of reporting medical attention of individuals <50 years who got no or a mild  reaction 
+
+$\beta_{AS}$ = log odds ratio of age group on severity of reaction
+
+$\beta_{AM}$ = log odds ratio of age group on seeking medical attention
+
+$\beta_{SM}$ = log odds ratio of severity reaction on seeking medical attention
+
+$\beta_{MD}$ = log odds ratio of seeking medical attention on reporting medical attention
+
+
+
+```{stan, output.var = "mod1", include = FALSE}
+
+data{
+
+  int N;
+  int R[N];
+  int S[N];
+  int A[N];
+  int M[N];
+  int D[N];
+  
+}
+parameters{
+
+  real ap;
+  real bAR;
+  real bSR;
+  real<lower=0> sigmap;
+  real aq;
+  real bAS;
+  real<lower=0> sigmaq;
+  real ag;
+  real bAM;
+  real bSM;
+  real<lower=0> sigmag;
+  real ah;
+  real bMD;
+ 
+  real<lower=0> sigmah;
+}
+transformed parameters{
+  vector[N] p;
+  vector[N] q;
+  vector[N] g;
+  vector[N] h;
+
+  for(i in 1:N) p[i] = inv_logit(ap + bAR*A[i] + bSR*S[i]);
+  for(i in 1:N) q[i] = inv_logit(aq + bAS*A[i]);
+  for(i in 1:N) g[i] = inv_logit(ag + bAM*A[i] + bSM*S[i]);
+  for(i in 1:N) h[i] = R[i]*(inv_logit(ah + bMD*M[i]));
+}
+model{
+
+  //priors
+  sigmap ~ exponential(1);
+  bSR ~ normal( 0, 2);
+  bAR ~ normal( 0, 2);
+  ap ~ normal( log(0.5) , sigmap );
+
+  //likelihood
+  R ~ bernoulli( p );
+
+  //priors
+  sigmaq ~ exponential( 1 ); 
+  bAS ~ normal( 0, 2);
+  aq ~ normal(log(0.5), sigmaq);
+
+  //likelihood
+  S ~ bernoulli(q);
+
+  //priors
+  sigmag ~ exponential(1);
+  bSM ~ normal( 0, 2);
+  bAM ~ normal( 0, 2);
+  ag ~ normal( log(0.5) , sigmag );
+
+  //likelihood
+  M ~ bernoulli( g );
+
+  //priors
+  sigmah ~ exponential(1);
+  bMD ~ normal( 0, 2);
+  ah ~ normal( log(0.5), sigmah );
+
+  //likelihood
+  for(i in 1:N) if(R[i] == 1) D[i] ~ bernoulli(h[i]);
+
+}
+
+generated quantities {
+  //generate predictions
+  real qA0 = inv_logit(aq);  //pA0 = P(S=1|A=0)
+  real qA1 = inv_logit(aq + bAS); //pA1 = P(S=1|A=1)
+  real pA0S0 = inv_logit(ap); //P(R=1|A=0,S=0)
+  real pA0S1 = inv_logit(ap + bSR); //P(R=1|A=0,S=1)
+  real pA1S0 = inv_logit(ap + bAR); //P(R=1|A=1,S=0)
+  real pA1S1 = inv_logit(ap + bAR + bSR); //P(R=1|A=1,S=1)
+  real gA0S0 = inv_logit(ag); //P(R=1|A=0,S=0)
+  real gA0S1 = inv_logit(ag + bSM); //P(R=1|A=0,S=1)
+  real gA1S0 = inv_logit(ag + bAM); //P(R=1|A=1,S=0)
+  real gA1S1 = inv_logit(ag + bAM + bSM); //P(R=1|A=1,S=1)
+  real hR1M1 = inv_logit(ah + bMD); //P(D=1|R=1,M=1)
+
+  //prior predictive check
+
+  real<lower=0> sigsim = exponential_rng(1);
+  real apsim = normal_rng(log(0.5),sigsim);
+  real bARsim = normal_rng(0,2);
+  real bSRsim = normal_rng(0,2);
+  real agsim = normal_rng(log(0.5),sigsim);
+  real bAMsim = normal_rng(0,2);
+  real bSMsim = normal_rng(0,2);
+  real ahsim = normal_rng(log(0.5),sigsim);
+  real bMDsim = normal_rng(0,2);
+
+  vector[N] psim;
+  vector[N] Rsim;
+  vector[N] gsim;
+  vector[N] Msim;
+  vector[N] hsim;
+  vector[N] Dsim;
+
+  for ( i in 1:N ) {
+    psim[i] = apsim + bARsim * A[i] + bSRsim * S[i];
+    psim[i] = inv_logit(psim[i]);
+    Rsim[i] = bernoulli_rng(psim[i]);
+
+
+  }
+  for ( i in 1:N ) {
+
+    gsim[i] = agsim + bAMsim * A[i] + bSMsim * S[i];
+    gsim[i] = inv_logit(gsim[i]);
+    Msim[i] = bernoulli_rng(gsim[i]);
+
+  }
+  for ( i in 1:N ) {
+
+    hsim[i] = ahsim + bMDsim * S[i];
+    hsim[i] = inv_logit(hsim[i]);
+    Dsim[i] = bernoulli_rng(hsim[i]);
+
+  }
+}
+
+```
+
+## Validating the model
+
+### No stratification
+
+```{r, echo = FALSE}
+options(mc.cores = parallel::detectCores())
+
+data <- list(S = S, R= R, A = A, M = M, D = D, N = N)
+mod_mod <- rstan::sampling(mod1, data = data,iter = 2500, warmup = 1000, chains = 2, refresh = FALSE, show_messages = FALSE)
+posterior <- as.array(mod_mod)
+
+paramsa <- summary(mod_mod, pars = c("ap", "bAR", "bSR", "aq", "bAS", "ag","ah", "bAM", "bSM", 
+                                      "bMD", 
+                                     "qA0", "qA1","pA0S0","pA0S1","pA1S1","pA1S0",
+                                     "gA0S0", "gA0S1", "gA1S0", "gA1S1", "hR1M1"))$summary
+print(paramsa)
+```
+
+<!-- ```{r, plot-range-betas, fig.height = 3, fig.cap = "Point range plot for $\\beta$ showing median and 95%CI"} -->
+<!-- color_scheme_set("red") -->
+<!-- mcmc_intervals(posterior, prob_outer = 0.95, prob = FALSE, pars = c("bAR", "bSR", "bAS", "bAM","bSM","bRD","bMD")) -->
+
+<!-- ``` -->
+
+
+```{r post-beta-c, fig.height = 5, fig.width = 5, fig.cap = "Posterior distributions for $\\beta$ showing mean and 80% interval." , echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("bAR", "bSR", "bAS", "bAM","bSM","bMD"))
+
+
+```
+
+
+
+```{r post-prob-1-c, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions for P(S = 1| A = 0) and P(S = 1| A = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("qA0", "qA1"))
+
+```
+
+
+```{r post-prob-2-c, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions for P(R = 1| A = 0, S = 0), P(R = 1| A = 0, S = 1), P(R = 1| A = 1, S = 1), and P(R = 1| A = 1, S = 0) showing mean, 80% interval..", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("pA0S0","pA0S1","pA1S0","pA1S1"))
+
+
+```
+
+
+```{r post-prob-3-c, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions of P(M = 1| A = 0, S = 0), P(M = 1| A = 0, S = 1), P (M = 1| A = 1, S = 0), and P(M = 1| A = 1, S = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("gA0S0", "gA0S1", "gA1S0", "gA1S1"))
+
+```
+
+
+```{r post-prob-4-c, fig.height = 2, fig.width = 2, fig.cap = "Predictive probability distribution of P(D = 1|R = 1, M = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("hR1M1"))
+
+```
+
+
+### A = 1
+
+
+```{stan, output.var = "mod2", include = FALSE}
+
+data{
+  int N;
+  int R[N];
+  int S[N];
+  int A[N];
+  int M[N];
+  int D[N];
+}
+parameters{
+  real ap;
+  real bSR;
+  real<lower=0> sigmap;
+  real aq;
+  real<lower=0> sigmaq;
+  real ag;
+  real bSM;
+  real<lower=0> sigmag;
+  real ah;
+  real bMD;
+  real<lower=0> sigmah;
+}
+transformed parameters{
+  vector[N] p;
+  vector[N] q;
+  vector[N] g;
+  vector[N] h;
+
+  for(i in 1:N) p[i] = inv_logit(ap + bSR*S[i]);
+  for(i in 1:N) q[i] = inv_logit(aq);
+  for(i in 1:N) g[i] = inv_logit(ag + bSM*S[i]);
+  for(i in 1:N) h[i] = inv_logit(ah + bMD*M[i]);
+}
+model{
+
+  //priors
+  sigmap ~ exponential(1);
+  bSR ~ normal( 0, 2);
+  ap ~ normal( log(0.5), sigmap );
+
+  //likelihood
+  R ~ bernoulli( p );
+
+  //priors
+  sigmaq ~ exponential( 1 );
+  aq ~ normal(log(0.5), sigmaq);
+
+  //likelihood
+  S ~ bernoulli(q);
+
+  //priors
+  sigmag ~ exponential(1);
+  bSM ~ normal( 0, 2);
+  ag ~ normal( log(0.5) , sigmag );
+
+  //likelihood
+  M ~ bernoulli( g );
+
+  //priors
+  sigmah ~ exponential(1);
+  bMD ~ normal( 0, 2);
+  ah ~ normal( log(0.5), sigmah );
+
+  //likelihood
+  for(i in 1:N) if(R[i] == 1) D[i] ~ bernoulli(h[i]);
+
+}
+
+generated quantities {
+  //generate predictions
+  real qA = inv_logit(aq);  //pA0 = P(S=1)
+  real pS0 = inv_logit(ap); //P(R=1|S=0)
+  real pS1 = inv_logit(ap + bSR); //P(R=1|S=1)
+  real gS0 = inv_logit(ag); //P(M=1|S=0)
+  real gS1 = inv_logit(ag + bSM); //P(M=1|S=1)
+  real hR1M1 = inv_logit(ah + bMD); //P(D=1|R=1,M=1)
+}
+
+```
+
+```{r, echo = FALSE}
+options(mc.cores = parallel::detectCores())
+
+S1 <- dat[dat$A == 1,]$S
+R1 <- dat[dat$A == 1,]$R
+M1 <- dat[dat$A == 1,]$M
+D1 <- dat[dat$A == 1,]$D
+A1 <- dat[dat$A == 1,]$A
+N1 <- sum(dat$A)
+
+dat1 <- list(S = S1, R= R1, A = A1, M = M1, D = D1, N = N1)
+mod2_mod <- rstan::sampling(mod2, data = dat1,iter = 2000, warmup = 1000, chains = 2, refresh = FALSE, show_messages = FALSE)
+posterior <- as.array(mod2_mod)
+
+params <- summary(mod2_mod, pars = c("ap","bSR", "aq", "ag","ah", "bSM",
+                                      "bMD",
+                                      "qA","pS1","pS0",
+                                      "gS0", "gS1", "hR1M1"))$summary
+print(params)
+```
+
+<!-- ```{r, plot-range-betas, fig.height = 3, fig.cap = "Point range plot for $\\beta$ showing median and 95%CI"} -->
+<!-- color_scheme_set("red") -->
+<!-- mcmc_intervals(posterior, prob_outer = 0.95, prob = FALSE, pars = c("bAR", "bSR", "bAS", "bAM","bSM","bRD","bMD")) -->
+
+<!-- ``` -->
+
+
+```{r post-beta, fig.height = 5, fig.width = 5, fig.cap = "Posterior distributions for $\\beta$ showing mean and 80% interval." , echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c( "bSR","bSM","bMD"))
+
+```
+
+
+
+```{r post-prob-1, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions for P(S = 1| A = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("qA"))
+
+
+```
+
+
+```{r post-prob-2, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions for P(R = 1| A = 1, S = 1), and P(R = 1| A = 1, S = 0) showing mean, 80% interval..", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("pS0","pS1"))
+
+```
+
+
+```{r post-prob-3, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions of P(M = 1| A = 1, S = 0), and P(M = 1| A = 1, S = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("gS0", "gS1"))
+```
+
+
+```{r post-prob-4, fig.height = 2, fig.width = 2, fig.cap = "Predictive probability distribution of P(D = 1|R = 1, M = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("hR1M1"))
+#ggplot(mapping = aes(x = draws_eta)) +
+#  geom_density() +
+#  xlab(latex2exp::TeX("$\\hat{\\eta}$"))
+```
+
+### A = 0
+
+```{r, echo = FALSE}
+options(mc.cores = parallel::detectCores())
+
+S0 <- dat[dat$A == 0,]$S
+R0 <- dat[dat$A == 0,]$R
+M0 <- dat[dat$A == 0,]$M
+D0 <- dat[dat$A == 0,]$D
+A0 <- dat[dat$A == 0,]$A
+N0 <- N - sum(dat$A)
+
+dat0 <- list(S = S0, R = R0, A = A0, M = M0, D = D0, N = N0)
+mod2a_mod <- rstan::sampling(mod2, data = dat0,iter = 2000, warmup = 1000, chains = 2, refresh = FALSE, show_messages = FALSE)
+posterior <- as.array(mod2a_mod)
+
+params0 <- summary(mod2a_mod, pars = c("ap", "bSR", "aq","ag","ah","bSM",
+                                      "bMD",
+                                     "qA", "pS0","pS1",
+                                     "gS0", "gS1", "hR1M1"))$summary
+print(params0)
+```
+
+<!-- ```{r, plot-range-betas, fig.height = 3, fig.cap = "Point range plot for $\\beta$ showing median and 95%CI"} -->
+<!-- color_scheme_set("red") -->
+<!-- mcmc_intervals(posterior, prob_outer = 0.95, prob = FALSE, pars = c("bAR", "bSR", "bAS", "bAM","bSM","bRD","bMD")) -->
+
+<!-- ``` -->
+
+
+```{r post-beta-a, fig.height = 5, fig.width = 5, fig.cap = "Posterior distributions for $\\beta$ showing mean and 80% interval." , echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c( "bSR","bSM","bMD"))
+#ggplot(mapping = aes(x = draws_eta)) +
+#  geom_density() +
+#  xlab(latex2exp::TeX("$\\hat{\\eta}$"))
+```
+
+
+
+```{r post-prob-1-a, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions for P(S = 1| A = 0) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("qA"))
+#ggplot(mapping = aes(x = draws_eta)) +
+#  geom_density() +
+#  xlab(latex2exp::TeX("$\\hat{\\eta}$"))
+```
+
+
+```{r post-prob-2-a, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions for P(R = 1| A = 0, S = 0) and P(R = 1| A = 0, S = 1) showing mean, 80% interval..", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("pS0","pS1"))
+
+```
+
+
+```{r post-prob-3-a, fig.height = 3, fig.width = 3, fig.cap = "Predictive probability distributions of P(M = 1| A = 0, S = 0) and P(M = 1| A = 0, S = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("gS0", "gS1"))
+```
+
+
+```{r post-prob-4-a, fig.height = 2, fig.width = 2, fig.cap = "Predictive probability distribution of P(D = 1|R = 1, M = 1) showing mean, 80% interval.", echo = FALSE}
+
+bayesplot::color_scheme_set("brightblue")
+bayesplot::mcmc_dens(posterior, pars = c("hR1M1"))
+
+```
+
+Prior predictive checks in the form of ROC curves of outcomes simulated from the priors compared to the outcomes in the simulated data were conducted to validate the prior specifications. In each ROC curve, control = 0, case = 1.
+
+
+```{r, fig.height = 3, fig.width = 3, echo = FALSE, message = FALSE}
+dd <- as.matrix(mod_mod, pars = c("Dsim"))
+Dsim <- apply(dd,2,mean)
+
+roc(dat$D ~ Dsim, plot = TRUE, print.auc = TRUE)
+
+```
+
+Dsim - simulated binary outcome whether an individual responded as having sought medical attention or not.
+
+```{r, fig.height = 3, fig.width = 3, echo = FALSE, message = FALSE}
+bb <- as.matrix(mod_mod, pars = c("Rsim"))
+Rsim <- apply(bb,2,mean)
+
+roc(dat$R ~ Rsim, plot = TRUE, print.auc = TRUE)
+```
+
+Rsim - simulated binary outcome whether an individual responded to the survey or not.
+
+```{r, fig.height = 3, fig.width = 3, echo = FALSE, message = FALSE}
+cc <- as.matrix(mod_mod, pars = c("Msim"))
+Msim <- apply(cc,2,mean)
+
+roc(dat$M ~ Msim, plot = TRUE, print.auc = TRUE)
+
+```
+
+Msim - simulated binary outcome whether an individual sought medical attention or not.
+
+
+
+
+## References
